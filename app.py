@@ -3,9 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-from streamlit_autorefresh import st_autorefresh
 
-from mustock.config import AppConfig
 from mustock.engine import CycleEngine
 
 
@@ -18,12 +16,12 @@ RANGE_MAP = {
 }
 
 
-@st.cache_data(ttl=60)
-def load_data_and_report(ticker: str):
+@st.cache_data(ttl=600)
+def load_data_and_report():
     engine = CycleEngine()
-    data = engine.load_all_data(ticker=ticker)
+    data = engine.load_all_data()
     report = engine.build_report(data)
-    return data, report
+    return engine, data, report
 
 
 def filter_price_window(price_df: pd.DataFrame, label: str) -> pd.DataFrame:
@@ -31,82 +29,42 @@ def filter_price_window(price_df: pd.DataFrame, label: str) -> pd.DataFrame:
     return price_df.sort_values("date").tail(window)
 
 
-def render_link_list(news_df: pd.DataFrame, title: str) -> None:
-    st.subheader(title)
-    if news_df.empty:
-        st.info("No recent items returned from configured sources.")
-        return
+def render_dashboard() -> None:
+    st.set_page_config(page_title="MU Cycle Monitor", layout="wide")
+    st.title("Micron (MU) Cycle Monitor")
+    st.caption("Tracks momentum, inventory/capex shifts, DRAM pricing signals, and AI-capex news sentiment.")
 
-    for _, row in news_df.head(15).iterrows():
-        source = row.get("source", "source")
-        published = row.get("published", row.get("date", ""))
-        link = row.get("url", "")
-        headline = row.get("title", row.get("headline", "headline"))
-        st.markdown(f"- [{headline}]({link}) — *{source}* ({published})")
-
-
-def render_stock_tab(ticker: str, horizon: str) -> None:
     try:
-        data, report = load_data_and_report(ticker)
+        _engine, data, report = load_data_and_report()
     except Exception as exc:  # noqa: BLE001
-        st.error(f"Failed to load {ticker} data: {exc}")
+        st.error(f"Failed to load market/fundamental/news data: {exc}")
         return
 
-    intraday = data["intraday"].sort_values("datetime")
-    last_px = float(intraday["close"].iloc[-1]) if not intraday.empty else float(data["price"]["close"].iloc[-1])
-    open_px = float(intraday["close"].iloc[0]) if not intraday.empty else float(data["price"]["close"].iloc[-2])
-    day_change = (last_px / open_px) - 1 if open_px else 0.0
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Cycle Trend", report.trend)
+    col2.metric("Composite Score", f"{report.score:.2f}")
+    col3.metric("1M Momentum", f"{report.momentum_1m:.1%}")
+    col4.metric("Sentiment", f"{report.sentiment:.2f}")
 
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric(
-        f"{ticker} Live Price",
-        f"${last_px:.2f}",
-        f"{day_change:.2%}",
-        help="Near real-time 1-minute price feed via yfinance. Auto-refreshes every 60 seconds.",
-    )
-    c2.metric("Cycle Trend", report.trend, help="Bullish/Neutral/Bearish based on weighted composite score.")
-    c3.metric("Composite Score", f"{report.score:.2f}", help=report.explanation)
-    c4.metric("1M Momentum", f"{report.momentum_1m:.1%}", help="21-trading-day price return.")
-    c5.metric("Sentiment", f"{report.sentiment:.2f}", help="Average VADER sentiment from themed news and pricing headlines.")
-
-    st.caption(report.explanation)
-
-    for alert in report.alerts:
-        st.warning(alert)
-    if not report.alerts:
+    if report.alerts:
+        for alert in report.alerts:
+            st.warning(alert)
+    else:
         st.success("No critical triggers fired.")
 
     left, right = st.columns([2, 1])
 
     with left:
+        horizon = st.selectbox("Price window", list(RANGE_MAP.keys()), index=2)
         px_df = filter_price_window(data["price"], horizon)
-        fig = px.line(
-            px_df,
-            x="date",
-            y="close",
-            title=f"{ticker} Price ({horizon})",
-            template="plotly_dark",
-            labels={"close": "Price", "date": "Date"},
-        )
-        fig.update_traces(hovertemplate="Date: %{x}<br>Close: $%{y:.2f}<extra></extra>")
+        fig = px.line(px_df, x="date", y="close", title=f"MU Price ({horizon})")
         st.plotly_chart(fig, use_container_width=True)
-
-        if not intraday.empty:
-            live_fig = px.line(
-                intraday,
-                x="datetime",
-                y="close",
-                title=f"{ticker} Intraday (1m)",
-                template="plotly_dark",
-            )
-            live_fig.update_traces(hovertemplate="Time: %{x}<br>Price: $%{y:.2f}<extra></extra>")
-            st.plotly_chart(live_fig, use_container_width=True)
 
     with right:
         st.subheader("Cycle Factors")
         factor_df = pd.DataFrame(
             {
-                "Factor": ["Momentum 1M", "Momentum 5M", "CapEx Acceleration", "Inventory Growth", "Sentiment"],
+                "Factor": ["Momentum 1M", "Momentum 5M", "Capex Acceleration", "Inventory Growth", "Sentiment"],
                 "Value": [
                     report.momentum_1m,
                     report.momentum_5m,
@@ -114,34 +72,25 @@ def render_stock_tab(ticker: str, horizon: str) -> None:
                     report.inventory_growth,
                     report.sentiment,
                 ],
-                "Description": [
-                    "21-day return, faster trend.",
-                    "105-day return, cycle trend.",
-                    "QoQ change in capex growth (higher can imply expansion risk).",
-                    "QoQ inventory change (higher can imply demand softness).",
-                    "News tone for DRAM spend, AI buildout, semicap cycles.",
-                ],
             }
         )
-        st.dataframe(factor_df, use_container_width=True, hide_index=True)
+        st.dataframe(factor_df, use_container_width=True)
 
-    render_link_list(data["news"].sort_values("published", ascending=False), "Signal News (click to open)")
-    render_link_list(data["pricing"].sort_values("date", ascending=False), "DRAM/HBM Pricing Headlines (click to open)")
+    st.subheader("Theme News")
+    if data["news"].empty:
+        st.info("No recent themed news items returned from the configured sources.")
+    else:
+        st.dataframe(
+            data["news"][["published", "source", "title", "topic", "url"]].sort_values("published", ascending=False),
+            use_container_width=True,
+            hide_index=True,
+        )
 
-
-def render_dashboard() -> None:
-    st.set_page_config(page_title="MU + AMAT Cycle Monitor", layout="wide")
-    st.title("Semiconductor Cycle Monitor")
-    st.caption("Tracks DRAM spending, AI datacenter buildout, and semiconductor CapEx-cycle signals.")
-
-    cfg = AppConfig()
-    st_autorefresh(interval=cfg.refresh_seconds * 1000, key="market-refresh")
-    horizon = st.selectbox("Price window", list(RANGE_MAP.keys()), index=2)
-
-    tabs = st.tabs(cfg.default_tickers)
-    for i, ticker in enumerate(cfg.default_tickers):
-        with tabs[i]:
-            render_stock_tab(ticker.strip().upper(), horizon)
+    st.subheader("DRAM Pricing Signal Headlines")
+    if data["pricing"].empty:
+        st.info("Could not scrape DRAM/HBM signal headlines in this run.")
+    else:
+        st.dataframe(data["pricing"], use_container_width=True, hide_index=True)
 
 
 if __name__ == "__main__":

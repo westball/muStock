@@ -25,16 +25,6 @@ class MarketDataClient:
             raise KeyError(f"Missing expected market fields: {missing}")
         return frame[required]
 
-    def get_intraday_prices(self, ticker: str, period: str = "1d", interval: str = "1m") -> pd.DataFrame:
-        frame = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True)
-        if frame.empty:
-            return pd.DataFrame(columns=["datetime", "close"])
-        if isinstance(frame.columns, pd.MultiIndex):
-            frame.columns = [col[0] for col in frame.columns]
-        frame = frame.reset_index().rename(columns=str.lower)
-        dt_col = "datetime" if "datetime" in frame.columns else "date"
-        return frame[[dt_col, "close"]].rename(columns={dt_col: "datetime"})
-
     def get_relative_performance(
         self,
         ticker: str,

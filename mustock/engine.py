@@ -22,7 +22,6 @@ class CycleReport:
     capex_acceleration: float
     inventory_growth: float
     sentiment: float
-    explanation: str
 
 
 class CycleEngine:
@@ -34,28 +33,26 @@ class CycleEngine:
         self.pricing = PricingScraper()
         self.sentiment_analyzer = SentimentIntensityAnalyzer()
 
-    def load_all_data(self, ticker: str) -> dict[str, pd.DataFrame]:
-        price = self.market.get_price_history(ticker, self.config.lookback_days)
-        intraday = self.market.get_intraday_prices(ticker)
+    def load_all_data(self) -> dict[str, pd.DataFrame]:
+        price = self.market.get_price_history(self.config.ticker, self.config.lookback_days)
         relative = self.market.get_relative_performance(
-            ticker,
+            self.config.ticker,
             self.config.benchmark_ticker,
             self.config.lookback_days,
         )
-        fundamentals = self.financial.get_inventory_and_capex(ticker)
+        fundamentals = self.financial.get_inventory_and_capex(self.config.ticker)
 
         news_frames = []
-        for query in self.config.signal_queries:
+        for query in [self.config.dram_query, self.config.ai_capex_query, self.config.hbm_query]:
             frame = self.news.fetch_news(query=query, days_back=self.config.sentiment_window_days)
             if not frame.empty:
                 frame["topic"] = query
                 news_frames.append(frame)
         news = pd.concat(news_frames, ignore_index=True) if news_frames else pd.DataFrame()
 
-        pricing = self.pricing.collect_dram_price_signals(self.config.dram_pricing_queries)
+        pricing = self.pricing.collect_dram_price_signals()
         return {
             "price": price,
-            "intraday": intraday,
             "relative": relative,
             "fundamentals": fundamentals,
             "news": news,
@@ -84,7 +81,7 @@ class CycleEngine:
         if not news_df.empty:
             texts.extend((news_df["title"].fillna("") + ". " + news_df["description"].fillna(""))[:200])
         if not pricing_df.empty:
-            texts.extend(pricing_df["headline"].fillna("")[:120])
+            texts.extend(pricing_df["headline"].fillna("")[:80])
 
         if not texts:
             return 0.0
@@ -104,7 +101,7 @@ class CycleEngine:
         capex_accel = float(latest_fund["capex_acceleration"])
         inventory_growth = float(latest_fund["inventory_growth"])
 
-        composite = 0.4 * momentum_1m + 0.2 * momentum_5m + 0.25 * sentiment - 0.1 * inventory_growth - 0.05 * capex_accel
+        composite = 0.45 * momentum_1m + 0.2 * momentum_5m + 0.2 * sentiment - 0.1 * inventory_growth - 0.05 * capex_accel
 
         alerts: list[str] = []
         if inventory_growth > 0.08:
@@ -112,16 +109,11 @@ class CycleEngine:
         if capex_accel > 0.15:
             alerts.append("Capex acceleration is high; monitor oversupply risk.")
         if sentiment < -0.15:
-            alerts.append("Negative sentiment flow across DRAM/AI buildout/semicap headlines.")
+            alerts.append("Negative sentiment flow across DRAM/AI capex news.")
         if momentum_1m < -0.08:
-            alerts.append("Short-term momentum has turned bearish.")
+            alerts.append("MU short-term momentum has turned bearish.")
 
         trend = "Bullish" if composite > 0.05 else "Bearish" if composite < -0.05 else "Neutral"
-        explanation = (
-            f"Score = 40% 1M momentum ({momentum_1m:.2%}) + 20% 5M momentum ({momentum_5m:.2%}) + "
-            f"25% sentiment ({sentiment:.2f}) - 10% inventory growth ({inventory_growth:.2%}) "
-            f"- 5% capex acceleration ({capex_accel:.2f})."
-        )
 
         return CycleReport(
             score=float(composite),
@@ -132,5 +124,4 @@ class CycleEngine:
             capex_acceleration=capex_accel,
             inventory_growth=inventory_growth,
             sentiment=sentiment,
-            explanation=explanation,
         )
